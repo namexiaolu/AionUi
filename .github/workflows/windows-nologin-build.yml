@@ -1,0 +1,188 @@
+name: Build Windows No-Login
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  BUN_INSTALL_REGISTRY: 'https://registry.npmjs.org/'
+
+jobs:
+  build:
+    name: Build Windows x64 (no-login)
+    runs-on: windows-2022
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream and compute HEAD sha
+        id: upstream
+        shell: bash
+        run: |
+          git remote add upstream https://github.com/iOfficeAI/AionUi.git
+          git fetch upstream dev --depth=1
+          git checkout --detach FETCH_HEAD
+          echo "upstream_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Upstream dev HEAD: $(git rev-parse --short HEAD)"
+          echo placeholder > .built-sha
+
+      # cache key = upstream sha, hit means this version was already built
+      - name: Check if this upstream version was already built
+        id: built-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .built-sha
+          key: windows-nologin-${{ steps.upstream.outputs.upstream_sha }}
+
+      - name: Skip when already built
+        if: steps.built-cache.outputs.cache-hit == 'true'
+        run: echo "Upstream ${{ steps.upstream.outputs.upstream_sha }} already built, skipping."
+
+      - name: Apply no-login patch
+        if: steps.built-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          git apply .github/patches/no-login.patch
+          echo "No-login patch applied to Router.tsx"
+
+      - name: Setup Node.js
+        if: steps.built-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup bun
+        if: steps.built-cache.outputs.cache-hit != 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Python
+        if: steps.built-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache Electron artifacts
+        if: steps.built-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/.cache/electron
+            ${{ runner.temp }}/.cache/electron-builder
+            ${{ env.LOCALAPPDATA }}\electron-builder\Cache
+          key: electron-cache-windows-x64-${{ hashFiles('package.json', 'bun.lock') }}
+
+      - name: Install dependencies
+        if: steps.built-cache.outputs.cache-hit != 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Run postinstall
+        if: steps.built-cache.outputs.cache-hit != 'true'
+        run: bun run postinstall || true
+
+      - name: Setup Windows native dependencies
+        if: steps.built-cache.outputs.cache-hit != 'true'
+        run: bun install --global node-gyp
+
+      - name: Setup Windows build environment
+        if: steps.built-cache.outputs.cache-hit != 'true'
+        run: echo "WindowsTargetPlatformVersion=10.0.19041.0" >> $env:GITHUB_ENV
+
+      - name: Setup MSBuild
+        if: steps.built-cache.outputs.cache-hit != 'true'
+        uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: '17.0'
+
+      - name: Rebuild native modules for Electron (Windows)
+        if: steps.built-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $arch = 'x64'
+          $electronVer = (node -p "require('./package.json').devDependencies.electron.replace(/[\^~]/g, '')").Trim()
+
+          Write-Host "Rebuilding native modules for Electron $electronVer ($arch)"
+
+          $success = $false
+          try {
+            $prebuildResult = bun x --yes prebuild-install --runtime=electron --target=$electronVer --platform=win32 --arch=$arch --force 2>&1
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "prebuild-install succeeded"
+              $success = $true
+            } else {
+              Write-Host "prebuild-install exited with code $LASTEXITCODE"
+            }
+          } catch {
+            Write-Host "prebuild-install failed: $_"
+          }
+
+          $sqliteNode = "node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+          if (-not (Test-Path $sqliteNode)) {
+            Write-Host "prebuild-install didn't produce binary, trying electron-rebuild..."
+            try {
+              bunx electron-rebuild -f -w better-sqlite3
+              if ($LASTEXITCODE -eq 0) { $success = $true }
+            } catch {
+              Write-Host "electron-rebuild failed: $_"
+            }
+          }
+
+          if (Test-Path $sqliteNode) {
+            $size = [math]::Round((Get-Item $sqliteNode).Length / 1MB, 1)
+            Write-Host "better-sqlite3 found: $sqliteNode ($size MB)"
+          } else {
+            Write-Error "better-sqlite3 native module not found at: $sqliteNode"
+            exit 1
+          }
+          exit 0
+        env:
+          npm_config_runtime: electron
+          npm_config_arch: x64
+          npm_config_target_arch: x64
+          npm_config_disturl: https://electronjs.org/headers
+          MSVS_VERSION: 2022
+          GYP_MSVS_VERSION: 2022
+
+      - name: Build installer (no-login)
+        if: steps.built-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: node scripts/build-with-builder.js x64 --win --x64 --config.win.signAndEditExecutable=false
+        env:
+          ELECTRON_BUILDER_COMPRESSION_LEVEL: '1'
+          NODE_OPTIONS: '--max-old-space-size=8192'
+          npm_config_runtime: electron
+          npm_config_disturl: https://electronjs.org/headers
+          npm_config_build_from_source: true
+          npm_config_cache: ${{ runner.temp }}/.npm
+          ELECTRON_CACHE: ${{ runner.temp }}/.cache/electron
+          ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/.cache/electron-builder
+          CI: true
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Mark upstream version as built
+        if: steps.built-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: .built-sha
+          key: windows-nologin-${{ steps.upstream.outputs.upstream_sha }}
+
+      - name: Upload installer
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-nologin-x64
+          path: |
+            out/*.exe
+            out/*.yml
+          if-no-files-found: warn
+          retention-days: 14

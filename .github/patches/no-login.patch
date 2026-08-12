@@ -1,0 +1,53 @@
+diff --git a/packages/desktop/src/renderer/components/layout/Router.tsx b/packages/desktop/src/renderer/components/layout/Router.tsx
+index b1e4f9a14..12ebda325 100644
+--- a/packages/desktop/src/renderer/components/layout/Router.tsx
++++ b/packages/desktop/src/renderer/components/layout/Router.tsx
+@@ -2,6 +2,7 @@ import React, { Suspense } from 'react';
+ import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
+ import AppLoader from '@renderer/components/layout/AppLoader';
+ import { useAuth } from '@renderer/hooks/context/AuthContext';
++import { isElectronDesktop } from '@renderer/utils/platform';
+ import { TEAM_MODE_ENABLED } from '@/common/config/constants';
+ const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
+ const Guid = React.lazy(() => import('@renderer/pages/guid'));
+@@ -42,6 +43,11 @@ const CapabilitiesRedirect: React.FC = () => {
+ const ProtectedLayout: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
+   const { status } = useAuth();
+ 
++  // Desktop client never shows a login wall; auth only applies to the WebUI mode.
++  if (isElectronDesktop()) {
++    return React.cloneElement(layout);
++  }
++
+   if (status === 'checking') {
+     return <AppLoader />;
+   }
+@@ -61,7 +67,13 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
+       <Routes>
+         <Route
+           path='/login'
+-          element={status === 'authenticated' ? <Navigate to='/guid' replace /> : withRouteFallback(LoginPage)}
++          element={
++            isElectronDesktop() || status === 'authenticated' ? (
++              <Navigate to='/guid' replace />
++            ) : (
++              withRouteFallback(LoginPage)
++            )
++          }
+         />
+         <Route element={<ProtectedLayout layout={layout} />}>
+           <Route index element={<Navigate to='/guid' replace />} />
+@@ -102,7 +114,12 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
+           <Route path='/scheduled' element={withRouteFallback(ScheduledTasksPage)} />
+           <Route path='/scheduled/:job_id' element={withRouteFallback(TaskDetailPage)} />
+         </Route>
+-        <Route path='*' element={<Navigate to={status === 'authenticated' ? '/guid' : '/login'} replace />} />
++        <Route
++          path='*'
++          element={
++            <Navigate to={isElectronDesktop() || status === 'authenticated' ? '/guid' : '/login'} replace />
++          }
++        />
+       </Routes>
+     </HashRouter>
+   );
