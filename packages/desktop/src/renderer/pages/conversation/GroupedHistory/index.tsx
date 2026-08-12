@@ -23,12 +23,12 @@ import SiderItem from '@renderer/components/layout/Sider/SiderItem';
 import TeamCreateModal from '@renderer/pages/team/components/TeamCreateModal';
 import WorkspaceCollapse from '../components/WorkspaceCollapse';
 import ConversationRow from './ConversationRow';
-import SortableConversationRow from './SortableConversationRow';
+import SortableSidebarRow from './SortableSidebarRow';
 import TeamRow from './TeamRow';
 import { useBatchSelection } from './hooks/useBatchSelection';
 import { useConversationActions } from './hooks/useConversationActions';
 import { useConversations } from './hooks/useConversations';
-import { useDragAndDrop } from './hooks/useDragAndDrop';
+import { sortableId, useDragAndDrop } from './hooks/useDragAndDrop';
 import { useTeamRows } from './hooks/useTeamRows';
 import type { ConversationRowProps, WorkspaceGroupedHistoryProps } from './types';
 
@@ -72,10 +72,17 @@ const WorkspaceGroupedHistory: React.FC<WorkspaceGroupedHistoryProps> = ({
   const { resolveTeamRow, renameModal: teamRenameModal } = useTeamRows({ pathname, onSessionClick });
 
   const renderTeamRow = useCallback(
-    (item: SidebarTeamItem, dimIcon = false) => {
+    (item: SidebarTeamItem, dimIcon = false, dragHandle?: React.ReactNode) => {
       const data = resolveTeamRow(item);
       return (
-        <TeamRow key={item.team_id} {...data} collapsed={collapsed} dimIcon={dimIcon} tooltipEnabled={tooltipEnabled} />
+        <TeamRow
+          key={item.team_id}
+          {...data}
+          collapsed={collapsed}
+          dimIcon={dimIcon}
+          tooltipEnabled={tooltipEnabled}
+          dragHandle={dragHandle}
+        />
       );
     },
     [resolveTeamRow, collapsed, tooltipEnabled]
@@ -176,8 +183,15 @@ const WorkspaceGroupedHistory: React.FC<WorkspaceGroupedHistoryProps> = ({
     markAsRead,
   });
 
+  // Pinned rows in backend order (conversation ∪ team). Falls back to the
+  // conversation-only projection for legacy callers that don't send `pinnedRows`.
+  const pinnedRowItems: SidebarItem[] = useMemo(
+    () => pinnedRows ?? pinnedConversations.map((conversation) => ({ type: 'conversation', conversation })),
+    [pinnedRows, pinnedConversations]
+  );
+
   const { sensors, handleDragEnd, isDragEnabled } = useDragAndDrop({
-    pinnedConversations,
+    pinnedRows: pinnedRowItems,
     batchMode,
     collapsed,
   });
@@ -270,8 +284,15 @@ const WorkspaceGroupedHistory: React.FC<WorkspaceGroupedHistoryProps> = ({
     return <ConversationRow key={conversation.id} {...rowProps} dimIcon={dimIcon} />;
   };
 
-  // Collect all sortable IDs for the pinned section
-  const pinnedIds = useMemo(() => pinnedConversations.map((c) => c.id), [pinnedConversations]);
+  // Sortable IDs for the pinned section, in backend order over the full union
+  // (conversation ∪ team). Composite ids keep the two id spaces from colliding.
+  const pinnedIds = useMemo(
+    () =>
+      pinnedRowItems.map((item) =>
+        item.type === 'team' ? sortableId('team', item.team_id) : sortableId('conversation', item.conversation.id)
+      ),
+    [pinnedRowItems]
+  );
 
   // Codex-style split: project folders (workspaces) on top, free conversations below.
   // Projects section: collect all workspace groups across timeline sections, ordered by recency.
@@ -317,13 +338,6 @@ const WorkspaceGroupedHistory: React.FC<WorkspaceGroupedHistoryProps> = ({
         }))
         .filter((section) => section.items.length > 0),
     [timelineSections]
-  );
-
-  // Pinned rows in backend order (conversation ∪ team). Falls back to the
-  // conversation-only projection for legacy callers that don't send `pinnedRows`.
-  const pinnedRowItems: SidebarItem[] = useMemo(
-    () => pinnedRows ?? pinnedConversations.map((conversation) => ({ type: 'conversation', conversation })),
-    [pinnedRows, pinnedConversations]
   );
 
   const hasAnyContent = pinnedRowItems.length > 0 || projectGroups.length > 0 || chatsSections.length > 0;
@@ -522,12 +536,32 @@ const WorkspaceGroupedHistory: React.FC<WorkspaceGroupedHistoryProps> = ({
                 <SortableContext items={pinnedIds} strategy={verticalListSortingStrategy}>
                   <div className='min-w-0'>
                     {pinnedRowItems.map((item) => {
-                      // Team rows render inline (non-draggable in PR-A — drag is PR-D);
-                      // dnd-kit tolerates non-sortable children inside the context.
-                      if (item.type === 'team') return renderTeamRow(item);
+                      // Pinned group is a conversation ∪ team union — both kinds drag
+                      // (PR-D) through the shared SortableSidebarRow, so they get the
+                      // identical hover-reveal 6-dot handle. The handle is the only
+                      // drag activator, so a plain click keeps its normal meaning.
+                      if (item.type === 'team') {
+                        return isDragEnabled ? (
+                          <SortableSidebarRow
+                            key={sortableId('team', item.team_id)}
+                            id={sortableId('team', item.team_id)}
+                          >
+                            {(dragHandle) => renderTeamRow(item, false, dragHandle)}
+                          </SortableSidebarRow>
+                        ) : (
+                          renderTeamRow(item)
+                        );
+                      }
                       const props = getConversationRowProps(item.conversation);
                       return isDragEnabled ? (
-                        <SortableConversationRow key={item.conversation.id} {...props} />
+                        <SortableSidebarRow
+                          key={item.conversation.id}
+                          id={sortableId('conversation', item.conversation.id)}
+                          disabled={props.batchMode}
+                          data={{ type: 'conversation', conversation: item.conversation }}
+                        >
+                          {(dragHandle) => <ConversationRow {...props} dragHandle={dragHandle} />}
+                        </SortableSidebarRow>
                       ) : (
                         <ConversationRow key={item.conversation.id} {...props} />
                       );
