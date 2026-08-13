@@ -27,10 +27,10 @@ jobs:
         shell: bash
         run: |
           git remote add upstream https://github.com/iOfficeAI/AionUi.git
-          git fetch upstream dev --depth=1
+          git fetch upstream main --depth=1
           git checkout --detach FETCH_HEAD
           echo "upstream_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "Upstream dev HEAD: $(git rev-parse --short HEAD)"
+          echo "Upstream main HEAD: $(git rev-parse --short HEAD)"
           echo placeholder > .built-sha
 
       # cache key = upstream sha, hit means this version was already built
